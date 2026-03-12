@@ -3,11 +3,8 @@ from __future__ import annotations
 from typing import Dict, List, Any
 import numpy as np
 import pandas as pd
+import copy
 
-
-# -----------------------------
-# Defaults (edit these anytime)
-# -----------------------------
 DEFAULT_CONFIG: Dict[str, Any] = {
     "n_patients": 2000,
     "seed": 7,
@@ -19,7 +16,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "Population 3": {"weight": 0.25},
         "Population 4": {"weight": 0.25},
     },
-    # Global method touchpoints (used for all populations)
     "avg_touchpoints_by_method": {
         "Method 1": 2.0,
         "Method 2": 3.0,
@@ -27,7 +23,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "Method 4": 4.0,
         "Method 5": 2.0,
     },
-    # Global allocated time per visit category
     "allocated_minutes_by_visit_category": {
         "VisitCat 1": 15,
         "VisitCat 2": 20,
@@ -36,8 +31,6 @@ DEFAULT_CONFIG: Dict[str, Any] = {
         "VisitCat 5": 60,
         "VisitCat 6": 10,
     },
-    # Per-population method distribution + probabilities + lognormal params
-    # mu/sigma are lognormal mean/stdev in log-space
     "population_params": {
         "Population 1": {
             "methods": [
@@ -283,3 +276,73 @@ def summarize(df: pd.DataFrame) -> Dict[str, Any]:
         "avg_total_time": float(df["Tot. Time"].mean()),
         "by_population": by_pop,
     }
+
+
+def _clamp_prob(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
+def _scale_method_field(cfg: Dict[str, Any], field: str, factor: float) -> Dict[str, Any]:
+    new_cfg = copy.deepcopy(cfg)
+    for pop_name, pop_cfg in new_cfg["population_params"].items():
+        for method_cfg in pop_cfg["methods"]:
+            method_cfg[field] = _clamp_prob(float(method_cfg[field]) * factor)
+    return new_cfg
+
+
+def run_sensitivity_analysis(cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    scenarios: List[Dict[str, Any]] = []
+
+    def add_scenario(category: str, scenario: str, scenario_cfg: Dict[str, Any]) -> None:
+        df = simulate(scenario_cfg)
+        summ = summarize(df)
+
+        scenarios.append({
+            "category": category,
+            "scenario": scenario,
+            "completed_rate": float(summ["completed_rate"]),
+            "avg_touchpoints": float(summ["avg_touchpoints"]),
+            "avg_total_time": float(summ["avg_total_time"]),
+        })
+
+    base_cfg = copy.deepcopy(cfg)
+
+    add_scenario("Baseline", "Current settings", copy.deepcopy(base_cfg))
+
+    low_demand = copy.deepcopy(base_cfg)
+    low_demand["lambda_per_week"] = float(base_cfg["lambda_per_week"]) * 0.8
+    add_scenario("Demand", "Demand -20%", low_demand)
+
+    add_scenario("Demand", "Demand baseline", copy.deepcopy(base_cfg))
+
+    high_demand = copy.deepcopy(base_cfg)
+    high_demand["lambda_per_week"] = float(base_cfg["lambda_per_week"]) * 1.2
+    add_scenario("Demand", "Demand +20%", high_demand)
+
+    lower_attempts = copy.deepcopy(base_cfg)
+    lower_attempts["max_attempts"] = max(1, int(base_cfg["max_attempts"]) - 1)
+    add_scenario("Max Attempts", "Max attempts -1", lower_attempts)
+
+    add_scenario("Max Attempts", "Max attempts baseline", copy.deepcopy(base_cfg))
+
+    higher_attempts = copy.deepcopy(base_cfg)
+    higher_attempts["max_attempts"] = int(base_cfg["max_attempts"]) + 1
+    add_scenario("Max Attempts", "Max attempts +1", higher_attempts)
+
+    sched_down = _scale_method_field(base_cfg, "p_schedule", 0.9)
+    add_scenario("Scheduling Success", "Scheduling success -10%", sched_down)
+
+    add_scenario("Scheduling Success", "Scheduling success baseline", copy.deepcopy(base_cfg))
+
+    sched_up = _scale_method_field(base_cfg, "p_schedule", 1.1)
+    add_scenario("Scheduling Success", "Scheduling success +10%", sched_up)
+
+    comp_down = _scale_method_field(base_cfg, "p_complete", 0.9)
+    add_scenario("Completion Success", "Completion success -10%", comp_down)
+
+    add_scenario("Completion Success", "Completion success baseline", copy.deepcopy(base_cfg))
+
+    comp_up = _scale_method_field(base_cfg, "p_complete", 1.1)
+    add_scenario("Completion Success", "Completion success +10%", comp_up)
+
+    return scenarios
