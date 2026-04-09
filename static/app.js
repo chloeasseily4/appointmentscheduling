@@ -161,5 +161,3 @@
   document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => new bootstrap.Tooltip(el));
 })();
 
-    app.run(host='0.0.0.0', port=port)
-
