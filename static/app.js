@@ -1,162 +1,142 @@
-(function () {
-  if (typeof DEFAULT_CFG === 'undefined') return;
+from __future__ import annotations
 
-  const clone = (obj) => JSON.parse(JSON.stringify(obj));
-  const state = {
-    touchpoints: clone(DEFAULT_CFG.avg_touchpoints_by_method),
-    alloc: clone(DEFAULT_CFG.allocated_minutes_by_visit_category),
-    pops: clone(DEFAULT_CFG.population_params),
-  };
+import io
+import json
+import os
 
-  const toggleBtn = document.getElementById('toggleAdvanced');
-  const advancedBlock = document.getElementById('advancedBlock');
-  const advancedOn = document.getElementById('advanced_on');
-  const advOk = document.getElementById('advOk');
-  const advError = document.getElementById('advError');
+import pandas as pd
+from flask import Flask, flash, redirect, render_template, request, send_file, url_for
 
-  function showAdvanced(open) {
-    advancedBlock.style.display = open ? 'block' : 'none';
-    advancedBlock.setAttribute('aria-hidden', open ? 'false' : 'true');
-    advancedOn.value = open ? '1' : '0';
-    if (toggleBtn) toggleBtn.textContent = open ? 'Advanced Settings ▲' : 'Advanced Settings ▼';
-  }
+from db import get_run, init_db, list_runs, save_run
+from simulation import DEFAULT_CONFIG, run_sensitivity_analysis, simulate, summarize
 
-  if (toggleBtn) {
-    toggleBtn.addEventListener('click', () => {
-      const isHidden = getComputedStyle(advancedBlock).display === 'none';
-      showAdvanced(isHidden);
-    });
-  }
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+app = Flask(__name__, template_folder=os.path.join(BASE_DIR, 'templates'), static_folder=os.path.join(BASE_DIR, 'static'))
+app.secret_key = 'dev-secret-change-me'
 
-  function makeNumberInput(value, step = '0.01', min = '0') {
-    const input = document.createElement('input');
-    input.className = 'form-control form-control-sm';
-    input.type = 'number';
-    input.step = step;
-    input.min = min;
-    input.value = value;
-    return input;
-  }
+init_db()
 
-  function renderTouchpoints() {
-    const tbody = document.querySelector('#touchpointsTable tbody');
-    tbody.innerHTML = '';
-    Object.entries(state.touchpoints).forEach(([k, v]) => {
-      const tr = document.createElement('tr');
-      const input = makeNumberInput(v, '0.1', '0');
-      input.addEventListener('input', () => state.touchpoints[k] = Number(input.value || 0));
-      tr.innerHTML = `<td>${k}</td>`;
-      const td = document.createElement('td'); td.appendChild(input); tr.appendChild(td);
-      tbody.appendChild(tr);
-    });
-  }
 
-  function renderAlloc() {
-    const tbody = document.querySelector('#allocTable tbody');
-    tbody.innerHTML = '';
-    Object.entries(state.alloc).forEach(([k, v]) => {
-      const tr = document.createElement('tr');
-      const input = makeNumberInput(v, '1', '0');
-      input.addEventListener('input', () => state.alloc[k] = Number(input.value || 0));
-      tr.innerHTML = `<td>${k}</td>`;
-      const td = document.createElement('td'); td.appendChild(input); tr.appendChild(td);
-      tbody.appendChild(tr);
-    });
-  }
+def _safe_float(x, default=0.0):
+    try:
+        return float(x)
+    except Exception:
+        return float(default)
 
-  function renderPopParams() {
-    const wrap = document.getElementById('popAccordion');
-    wrap.innerHTML = '';
-    Object.entries(state.pops).forEach(([popName, popCfg], popIdx) => {
-      const card = document.createElement('div');
-      card.className = 'accordion mb-3';
-      const item = document.createElement('div');
-      item.className = 'accordion-item';
-      item.innerHTML = `
-        <h2 class="accordion-header" id="heading-${popIdx}">
-          <button class="accordion-button ${popIdx ? 'collapsed' : ''}" type="button" data-bs-toggle="collapse" data-bs-target="#collapse-${popIdx}">${popName}</button>
-        </h2>
-        <div id="collapse-${popIdx}" class="accordion-collapse collapse ${popIdx ? '' : 'show'}">
-          <div class="accordion-body">
-            <div class="table-responsive mb-3">
-              <table class="table table-sm align-middle">
-                <thead><tr><th>Method</th><th>Probability of Use</th><th>P(schedule)</th><th>P(complete)</th><th>mu</th><th>sigma</th><th>mu2</th><th>sigma2</th></tr></thead>
-                <tbody class="method-body"></tbody>
-              </table>
-            </div>
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead><tr><th>Visit Category</th><th>Probability</th></tr></thead>
-                <tbody class="visit-body"></tbody>
-              </table>
-            </div>
-          </div>
-        </div>`;
-      const methodBody = item.querySelector('.method-body');
-      popCfg.methods.forEach((m, i) => {
-        const tr = document.createElement('tr');
-        const fields = ['likelihood','p_schedule','p_complete','mu','sigma','mu2','sigma2'];
-        tr.innerHTML = `<td>${m.method}</td>`;
-        fields.forEach((f) => {
-          const td = document.createElement('td');
-          const input = makeNumberInput(m[f], '0.01', '0');
-          input.addEventListener('input', () => state.pops[popName].methods[i][f] = Number(input.value || 0));
-          td.appendChild(input); tr.appendChild(td);
-        });
-        methodBody.appendChild(tr);
-      });
-      const visitBody = item.querySelector('.visit-body');
-      popCfg.visit_categories.forEach((v, i) => {
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>${v.category}</td>`;
-        const td = document.createElement('td');
-        const input = makeNumberInput(v.prob, '0.01', '0');
-        input.addEventListener('input', () => state.pops[popName].visit_categories[i].prob = Number(input.value || 0));
-        td.appendChild(input); tr.appendChild(td);
-        visitBody.appendChild(tr);
-      });
-      card.appendChild(item);
-      wrap.appendChild(card);
-    });
-  }
 
-  function validate() {
-    const errors = [];
-    Object.entries(state.pops).forEach(([popName, popCfg]) => {
-      const methodSum = popCfg.methods.reduce((s, x) => s + Number(x.likelihood || 0), 0);
-      const visitSum = popCfg.visit_categories.reduce((s, x) => s + Number(x.prob || 0), 0);
-      if (methodSum <= 0) errors.push(`${popName}: method probabilities must sum above 0.`);
-      if (visitSum <= 0) errors.push(`${popName}: visit probabilities must sum above 0.`);
-    });
-    advError.style.display = errors.length ? 'block' : 'none';
-    advError.innerHTML = errors.join('<br>');
-    advOk.style.display = errors.length ? 'none' : 'inline';
-    return !errors.length;
-  }
+def _safe_int(x, default=0):
+    try:
+        return int(float(x))
+    except Exception:
+        return int(default)
 
-  function syncHidden() {
-    document.getElementById('avg_touchpoints_json').value = JSON.stringify(state.touchpoints);
-    document.getElementById('allocated_minutes_json').value = JSON.stringify(state.alloc);
-    document.getElementById('population_params_json').value = JSON.stringify(state.pops);
-  }
 
-  document.getElementById('validateAdvanced')?.addEventListener('click', validate);
-  document.getElementById('resetTouchpoints')?.addEventListener('click', () => { state.touchpoints = clone(DEFAULT_CFG.avg_touchpoints_by_method); renderTouchpoints(); syncHidden(); });
-  document.getElementById('resetAlloc')?.addEventListener('click', () => { state.alloc = clone(DEFAULT_CFG.allocated_minutes_by_visit_category); renderAlloc(); syncHidden(); });
-  document.getElementById('resetPopParams')?.addEventListener('click', () => { state.pops = clone(DEFAULT_CFG.population_params); renderPopParams(); syncHidden(); });
-  document.getElementById('simForm')?.addEventListener('submit', (e) => {
-    const open = getComputedStyle(advancedBlock).display !== 'none';
-    if (open && !validate()) {
-      e.preventDefault();
-      return;
-    }
-    syncHidden();
-  });
+def build_config_from_form(form) -> dict:
+    cfg = json.loads(json.dumps(DEFAULT_CONFIG))
+    cfg['n_patients'] = _safe_int(form.get('n_patients'), cfg['n_patients'])
+    cfg['seed'] = _safe_int(form.get('seed'), cfg['seed'])
+    cfg['max_attempts'] = _safe_int(form.get('max_attempts'), cfg['max_attempts'])
+    cfg['lambda_per_week'] = _safe_float(form.get('lambda_per_week'), cfg['lambda_per_week'])
+    cfg.setdefault('access', {})['daily_capacity'] = _safe_int(
+        form.get('daily_capacity'), cfg.get('access', {}).get('daily_capacity', 8)
+    )
 
-  renderTouchpoints();
-  renderAlloc();
-  renderPopParams();
-  syncHidden();
+    for pop in cfg['populations'].keys():
+        key = f'pop_weight__{pop}'
+        if key in form:
+            cfg['populations'][pop]['weight'] = _safe_float(form.get(key), cfg['populations'][pop]['weight'])
 
-  document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach((el) => new bootstrap.Tooltip(el));
-})();
+    advanced_on = form.get('advanced_on') == '1'
+    if advanced_on:
+        pop_params_json = (form.get('population_params_json') or '').strip()
+        tp_json = (form.get('avg_touchpoints_json') or '').strip()
+        alloc_json = (form.get('allocated_minutes_json') or '').strip()
+        if pop_params_json:
+            cfg['population_params'] = json.loads(pop_params_json)
+        if tp_json:
+            cfg['avg_touchpoints_by_method'] = json.loads(tp_json)
+        if alloc_json:
+            cfg['allocated_minutes_by_visit_category'] = json.loads(alloc_json)
+    return cfg
+
+
+@app.get('/')
+def index():
+    return render_template('index.html', default_cfg=DEFAULT_CONFIG)
+
+
+@app.post('/run')
+def run_sim():
+    try:
+        cfg = build_config_from_form(request.form)
+        df = simulate(cfg)
+        summ = summarize(df)
+        run_id = save_run(cfg, summ, df.to_csv(index=False))
+        return redirect(url_for('archive_run', run_id=run_id))
+    except Exception as e:
+        flash(str(e), 'danger')
+        return redirect(url_for('index'))
+
+
+@app.get('/archive')
+def archive():
+    runs = list_runs(limit=100)
+    return render_template('archive.html', runs=runs)
+
+
+@app.get('/archive/<int:run_id>')
+def archive_run(run_id: int):
+    run = get_run(run_id)
+    if not run:
+        flash('Run not found.', 'warning')
+        return redirect(url_for('archive'))
+
+    df = pd.read_csv(io.StringIO(run['csv_text']))
+    sensitivity = run_sensitivity_analysis(run['config'])
+    baseline = next((s for s in sensitivity if s['category'] == 'Baseline'), None)
+    if baseline is None:
+        baseline = {'completed_rate': 0.0, 'avg_touchpoints': 0.0, 'avg_total_time': 0.0, 'avg_access_delay': 0.0, 'mean_utilization': 0.0}
+
+    for s in sensitivity:
+        s['delta_completion'] = s.get('completed_rate', 0.0) - baseline.get('completed_rate', 0.0)
+        s['delta_touchpoints'] = s.get('avg_touchpoints', 0.0) - baseline.get('avg_touchpoints', 0.0)
+        s['delta_time'] = s.get('avg_total_time', 0.0) - baseline.get('avg_total_time', 0.0)
+        s['delta_access_delay'] = s.get('avg_access_delay', 0.0) - baseline.get('avg_access_delay', 0.0)
+        s['delta_utilization'] = s.get('mean_utilization', 0.0) - baseline.get('mean_utilization', 0.0)
+
+    summary = run['summary'] or {}
+    access_summary = summary.setdefault('access', {})
+    access_summary.setdefault('mean_access_delay', 0.0)
+    access_summary.setdefault('mean_utilization', 0.0)
+    access_summary.setdefault('max_queue', 0)
+    access_summary.setdefault('timeline', [])
+    access_summary.setdefault('days_simulated', 0)
+    access_summary.setdefault('request_to_appt_p90', 0.0)
+    access_summary.setdefault('request_to_appt_p95', 0.0)
+
+    return render_template(
+        'results.html',
+        run_id=run_id,
+        summary=summary,
+        sensitivity=sensitivity,
+        preview=df.head(25).to_dict(orient='records'),
+        columns=list(df.columns),
+        access_timeline=access_summary.get('timeline', []),
+        created_at=run['created_at'],
+    )
+
+
+@app.get('/archive/<int:run_id>/download')
+def archive_download(run_id: int):
+    run = get_run(run_id)
+    if not run:
+        flash('Run not found.', 'warning')
+        return redirect(url_for('archive'))
+    csv_bytes = run['csv_text'].encode('utf-8')
+    return send_file(io.BytesIO(csv_bytes), mimetype='text/csv', as_attachment=True, download_name=f'appt_sim_run_{run_id}.csv')
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port)
+
